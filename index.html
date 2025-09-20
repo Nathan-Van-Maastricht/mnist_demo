@@ -86,7 +86,7 @@
     <script>
         const IMAGE_SIZE = 28;
         const NUM_ROWS_TO_REMOVE = 10;
-        const ONNX_MODEL_PATH = 'combo_v17.onnx';
+        const ONNX_MODEL_PATH = 'combo_v23.onnx';
 
         // DOM elements
         const processBtn = document.getElementById('processBtn');
@@ -234,7 +234,7 @@
             const noisyPixels = new Float32Array(pixels);
             for (let i = 0; i < noisyPixels.length; i++) {
                 const noise = boxMullerTransform() * noiseStdev;
-                let noisyValue = noisyPixels[i] + noise;
+                const noisyValue = noisyPixels[i] + noise;
                 noisyPixels[i] = Math.min(1.0, Math.max(0.0, noisyValue));
             }
             return noisyPixels;
@@ -246,16 +246,7 @@
             for (let i = 0; i < noisyPixels.length; i++) {
                 const noise = boxMullerTransform() * noiseStdev;
                 const noisyValue = noisyPixels[i] + noise;
-
-                // Check for negative numbers and handle with a custom fractional logic
-                let fractionalPart;
-                if (noisyValue < 0) {
-                    fractionalPart = noisyValue - Math.ceil(noisyValue);
-                } else {
-                    fractionalPart = noisyValue - Math.floor(noisyValue);
-                }
-
-                noisyPixels[i] = fractionalPart;
+                noisyPixels[i] = Math.min(1.0, Math.max(0.0, noisyValue));
             }
             return noisyPixels;
         }
@@ -312,16 +303,16 @@
                 // Get grayscale pixels directly from the original canvas
                 const originalPixels = getGrayscalePixels(originalCanvas);
                 const maskMethod = maskMethodSelect.value;
-                const noiseLevel = 0.25; // Hardcoded noise level
+                const noiseLevel = 0.4; // Hardcoded noise level
                 let noisyPixels;
 
                 // Apply the selected mask
                 switch (maskMethod) {
                     case 'noise_clamp':
-                        noisyPixels = applyNoiseClampMask(originalPixels, 2 * noiseLevel);
+                        noisyPixels = applyNoiseClampMask(originalPixels, noiseLevel);
                         break;
                     case 'noise_frac':
-                        noisyPixels = applyNoiseFracMask(originalPixels, noiseLevel / 2);
+                        noisyPixels = applyNoiseFracMask(originalPixels, noiseLevel);
                         break;
                     case 'remove_rows_and_cols':
                         noisyPixels = applyRowAndColMask(originalPixels);
