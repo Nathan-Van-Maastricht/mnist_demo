@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width">
+    <title>MNIST Denoising & Classification</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1 class="title">MNIST In-painting & Classification</h1>
+        <p class="subtitle">Draw a handwritten digit in the first box to see the model in action.</p>
+
+        <!-- Main UI container -->
+        <div class="space-y-6">
+            <!-- Controls -->
+            <div class="controls-container">
+                <div class="select-container">
+                    <label for="maskMethod">Masking Method:</label>
+                    <select id="maskMethod">
+                        <option value="noise_clamp">Random Noise (Clamp)</option>
+                        <option value="noise_frac">Random Noise (Fractional)</option>
+                        <option value="remove_rows_and_cols">Remove Rows and Columns</option>
+                    </select>
+                </div>
+                <button id="processBtn" class="btn primary">
+                    Process Image
+                </button>
+                <button id="clearBtn" class="btn secondary">
+                    Clear
+                </button>
+            </div>
+            
+            <!-- Loading Indicator -->
+            <div id="loading" class="loading-indicator">
+                <svg class="loading-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Processing...
+            </div>
+
+            <!-- Image display section -->
+            <div class="image-grid">
+                <div class="image-container">
+                    <span class="image-title">Draw Here</span>
+                    <canvas id="originalCanvas" class="canvas-box"></canvas>
+                </div>
+                <div class="image-container">
+                    <span class="image-title">Masked</span>
+                    <canvas id="maskedCanvas" class="canvas-box"></canvas>
+                </div>
+                <div class="image-container">
+                    <span class="image-title">Reconstructed</span>
+                    <canvas id="reconstructedCanvas" class="canvas-box"></canvas>
+                </div>
+            </div>
+
+            <!-- Classification Result -->
+            <div id="resultBox" class="result-box">
+                <div>
+                    <span class="result-text">Classification Drawn: </span>
+                    <span id="classificationResultDrawn" class="result-value"></span>
+                </div>
+                <div>
+                    <span class="result-text">Classification Masked: </span>
+                    <span id="classificationResultMasked" class="result-value"></span>
+                </div>
+                <div>
+                    <span class="result-text">Classification Reconstructed: </span>
+                    <span id="classificationResultReconstructed" class="result-value"></span>
+                </div>
+            </div>
+
+            
+                
+            
+            <div id="errorBox" class="error-box">
+                <span class="error-text">Error: </span>
+                <span id="errorMessage" class="error-message"></span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const IMAGE_SIZE = 28;
+        const NUM_ROWS_TO_REMOVE = 10;
+        const ONNX_MODEL_PATH = 'combo_v17.onnx';
+
+        // DOM elements
+        const processBtn = document.getElementById('processBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const loadingDiv = document.getElementById('loading');
+        const resultBox = document.getElementById('resultBox');
+        const errorBox = document.getElementById('errorBox');
+        const classificationResultDrawn = document.getElementById('classificationResultDrawn');
+        const classificationResultMasked = document.getElementById('classificationResultMasked')
+        const classificationResultReconstructed = document.getElementById('classificationResultReconstructed')
+        const originalCanvas = document.getElementById('originalCanvas');
+        const maskedCanvas = document.getElementById('maskedCanvas');
+        const reconstructedCanvas = document.getElementById('reconstructedCanvas');
+        const maskMethodSelect = document.getElementById('maskMethod');
+
+        let ortSession = null;
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        // Set up the drawing canvas context
+        const originalCtx = originalCanvas.getContext('2d');
+        originalCanvas.width = IMAGE_SIZE;
+        originalCanvas.height = IMAGE_SIZE;
+        originalCtx.fillStyle = 'black';
+        originalCtx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+        originalCtx.lineWidth = 2;
+        originalCtx.lineCap = 'round';
+        originalCtx.strokeStyle = 'white';
+
+        // Unified event handler for drawing
+        function handleDrawing(e) {
+            e.preventDefault();
+
+            let clientX, clientY;
+            if (e.touches) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+
+            const rect = originalCanvas.getBoundingClientRect();
+            const currentX = (clientX - rect.left) * (originalCanvas.width / rect.width);
+            const currentY = (clientY - rect.top) * (originalCanvas.height / rect.height);
+
+            switch (e.type) {
+                case 'mousedown':
+                case 'touchstart':
+                    isDrawing = true;
+                    [lastX, lastY] = [currentX, currentY];
+                    break;
+                case 'mousemove':
+                case 'touchmove':
+                    if (!isDrawing) return;
+                    originalCtx.beginPath();
+                    originalCtx.moveTo(lastX, lastY);
+                    originalCtx.lineTo(currentX, currentY);
+                    originalCtx.stroke();
+                    [lastX, lastY] = [currentX, currentY];
+                    break;
+                case 'mouseup':
+                case 'touchend':
+                case 'mouseout':
+                    isDrawing = false;
+                    break;
+            }
+        }
+
+        // Attach event listeners for both mouse and touch
+        originalCanvas.addEventListener('mousedown', handleDrawing);
+        originalCanvas.addEventListener('mousemove', handleDrawing);
+        originalCanvas.addEventListener('mouseup', handleDrawing);
+        originalCanvas.addEventListener('mouseout', handleDrawing);
+        originalCanvas.addEventListener('touchstart', handleDrawing);
+        originalCanvas.addEventListener('touchmove', handleDrawing);
+        originalCanvas.addEventListener('touchend', handleDrawing);
+
+        // Function to clear all canvases
+        function clearCanvas() {
+            originalCtx.fillStyle = 'black';
+            originalCtx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            maskedCanvas.getContext('2d').clearRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            reconstructedCanvas.getContext('2d').clearRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            resultBox.style.display = 'none';
+        }
+
+        // Function to draw image on canvas
+        function drawImage(canvas, image, isGrayscale = false) {
+            const ctx = canvas.getContext('2d');
+            canvas.width = IMAGE_SIZE;
+            canvas.height = IMAGE_SIZE;
+            ctx.clearRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            if (isGrayscale) {
+                const imageData = ctx.createImageData(IMAGE_SIZE, IMAGE_SIZE);
+                for (let i = 0; i < image.length; i++) {
+                    const value = image[i] * 255;
+                    imageData.data[i * 4] = value;
+                    imageData.data[i * 4 + 1] = value;
+                    imageData.data[i * 4 + 2] = value;
+                    imageData.data[i * 4 + 3] = 255;
+                }
+                ctx.putImageData(imageData, 0, 0);
+            } else {
+                ctx.drawImage(image, 0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            }
+        }
+
+        // Function to get pixel data from canvas
+        function getGrayscalePixels(canvas) {
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+            const pixels = imageData.data;
+            const grayscalePixels = new Float32Array(IMAGE_SIZE * IMAGE_SIZE);
+            for (let i = 0; i < pixels.length; i += 4) {
+                // If the sum of RGB channels is greater than 0, it's not a pure black background pixel.
+                if (pixels[i] + pixels[i + 1] + pixels[i + 2] > 50) {
+                    const r = pixels[i];
+                    const g = pixels[i + 1];
+                    const b = pixels[i + 2];
+                    // Simple luminance formula for grayscale
+                    grayscalePixels[i / 4] = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                } else {
+                    grayscalePixels[i / 4] = 0;
+                }
+            }
+
+            return grayscalePixels;
+        }
+
+        // --- Masking Functions ---
+
+        // Helper function for generating a standard normal random number
+        function boxMullerTransform() {
+            let u = 0, v = 0;
+            while(u === 0) u = Math.random(); //Converting [0,1) to (0,1)
+            while(v === 0) v = Math.random();
+            const z = Math.sqrt( -2.0 * Math.log( u ) ) * Math.cos( 2.0 * Math.PI * v );
+            return z;
+        }
+
+        // Random noise with clamping
+        function applyNoiseClampMask(pixels, noiseStdev) {
+            const noisyPixels = new Float32Array(pixels);
+            for (let i = 0; i < noisyPixels.length; i++) {
+                const noise = boxMullerTransform() * noiseStdev;
+                let noisyValue = noisyPixels[i] + noise;
+                noisyPixels[i] = Math.min(1.0, Math.max(0.0, noisyValue));
+            }
+            return noisyPixels;
+        }
+
+        function applyNoiseFracMask(pixels, noiseStdev) {
+            const noisyPixels = new Float32Array(pixels);
+            const epsilon = 1e-6; // A small value to check for near-zero numbers
+            for (let i = 0; i < noisyPixels.length; i++) {
+                const noise = boxMullerTransform() * noiseStdev;
+                const noisyValue = noisyPixels[i] + noise;
+
+                // Check for negative numbers and handle with a custom fractional logic
+                let fractionalPart;
+                if (noisyValue < 0) {
+                    fractionalPart = noisyValue - Math.ceil(noisyValue);
+                } else {
+                    fractionalPart = noisyValue - Math.floor(noisyValue);
+                }
+
+                noisyPixels[i] = fractionalPart;
+            }
+            return noisyPixels;
+        }
+
+        function applyRowAndColMask(pixels) {
+            const noisyPixels = new Float32Array(pixels);
+            const allRows = Array.from({ length: IMAGE_SIZE }, (_, i) => i);
+            const allCols = Array.from({ length: IMAGE_SIZE }, (_, i) => i);
+            
+            // Shuffle rows and columns and select a random subset
+            for (let i = allRows.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allRows[i], allRows[j]] = [allRows[j], allRows[i]];
+            }
+            const rowsToZero = allRows.slice(0, NUM_ROWS_TO_REMOVE);
+
+            for (let i = allCols.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allCols[i], allCols[j]] = [allCols[j], allCols[i]];
+            }
+            const colsToZero = allCols.slice(0, NUM_ROWS_TO_REMOVE);
+
+            // Zero out selected rows
+            for (const row of rowsToZero) {
+                for (let x = 0; x < IMAGE_SIZE; x++) {
+                    const index = row * IMAGE_SIZE + x;
+                    noisyPixels[index] = 0;
+                }
+            }
+
+            // Zero out selected columns
+            for (const col of colsToZero) {
+                for (let y = 0; y < IMAGE_SIZE; y++) {
+                    const index = y * IMAGE_SIZE + col;
+                    noisyPixels[index] = 0;
+                }
+            }
+            return noisyPixels;
+        }
+
+        // Main processing function
+        async function processImage() {
+            try {
+                // Show loading indicator
+                loadingDiv.style.display = 'block';
+                resultBox.style.display = 'none';
+                errorBox.style.display = 'none';
+
+                if (!ortSession) {
+                    // Load the ONNX model once
+                    ortSession = await ort.InferenceSession.create(ONNX_MODEL_PATH);
+                }
+                
+                // Get grayscale pixels directly from the original canvas
+                const originalPixels = getGrayscalePixels(originalCanvas);
+                const maskMethod = maskMethodSelect.value;
+                const noiseLevel = 0.25; // Hardcoded noise level
+                let noisyPixels;
+
+                // Apply the selected mask
+                switch (maskMethod) {
+                    case 'noise_clamp':
+                        noisyPixels = applyNoiseClampMask(originalPixels, 2 * noiseLevel);
+                        break;
+                    case 'noise_frac':
+                        noisyPixels = applyNoiseFracMask(originalPixels, noiseLevel / 2);
+                        break;
+                    case 'remove_rows_and_cols':
+                        noisyPixels = applyRowAndColMask(originalPixels);
+                        break;
+                    default:
+                        showError("Invalid masking method selected.");
+                        return;
+                }
+
+                // Draw masked image to provide immediate feedback
+                drawImage(maskedCanvas, noisyPixels, true);
+
+                
+                const inputTensorClean = new ort.Tensor('float32', originalPixels, [1, 1, IMAGE_SIZE, IMAGE_SIZE]);
+                const outputs_clean = await ortSession.run({input_image: inputTensorClean})
+                const classLogitsClean = outputs_clean.class_logprobs.data;
+
+                const inputTensorNoisy = new ort.Tensor('float32', noisyPixels, [1, 1, IMAGE_SIZE, IMAGE_SIZE]);                
+                const outputs_noisy = await ortSession.run({ input_image: inputTensorNoisy });
+
+                // Process the outputs
+                const reconstructedTensor = outputs_noisy.reconstructed_image;
+                const reconstructedPixels = reconstructedTensor.data;
+                const classLogitsNoisy = outputs_noisy.class_logprobs.data;
+
+                const outputs_secondary = await ortSession.run({ input_image: reconstructedTensor});
+                const classLogitsReconstructed = outputs_secondary.class_logprobs.data;
+
+                // Display reconstructed image
+                drawImage(reconstructedCanvas, reconstructedPixels, true);
+                
+                // Get the classified digit
+                const predictedDigitClean = classLogitsClean.indexOf(Math.max(...classLogitsClean));
+                classificationResultDrawn.textContent = predictedDigitClean;
+
+                const predictedDigitNoisy = classLogitsNoisy.indexOf(Math.max(...classLogitsNoisy));
+                classificationResultMasked.textContent = predictedDigitNoisy;
+
+                const predictedDigitReconstructed = classLogitsReconstructed.indexOf(Math.max(...classLogitsReconstructed));
+                classificationResultReconstructed.textContent = predictedDigitReconstructed;
+
+                resultBox.style.display = 'block';
+
+            } catch (e) {
+                console.error(e);
+                showError("An error occurred during processing. Please check the console for details.");
+            } finally {
+                loadingDiv.style.display = 'none';
+            }
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorBox.style.display = 'block';
+        }
+
+        // Attach event listeners
+        processBtn.addEventListener('click', processImage);
+        clearBtn.addEventListener('click', clearCanvas);
+    </script>
+</body>
+</html>
